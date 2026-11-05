@@ -1,0 +1,94 @@
+name: Build Nokia XG-040G-TF Auto-Sync
+
+on:
+  workflow_dispatch: # 支持手动点击触发
+  push:
+    paths:
+      - '.config' # 修改 .config 自动触发
+  schedule:
+    - cron: '0 20 * * 5' # 每周五 20:00 UTC 触发 (北京时间周六早上 4:00)，实现上游自动同步更新
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # 确保能发布到 Release
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib \
+            g++-multilib git gperf haveged help2man libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool \
+            libyaml-dev libz-dev lld llvm nano ninja-build p7zip p7zip-full patch pkgconf python3 \
+            python3-pip python3-ply python3-docutils python3-pyelftools rsync subversion swig texinfo \
+            uglifyjs upx-ucl unzip vim wget xxd zlib1g-dev zstd
+
+      - name: Clone PONWrt Upstream & NPU Plugin
+        run: |
+          # 每次运行都会拉取 pbs05 的最新源码，实现自动更新
+          git clone --depth 1 https://github.com/pbs05/ponwrt.git openwrt
+          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git openwrt/package/luci-app-airoha-npu
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply Configuration
+        run: |
+          cp .config openwrt/.config
+          cd openwrt
+          make defconfig
+
+      - name: Download Package Sources
+        run: |
+          cd openwrt
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile Firmware
+        run: |
+          cd openwrt
+          echo "Starting compilation with $(nproc) threads..."
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Organize Artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          cd openwrt/bin/targets/airoha/an7581
+          cp *xg-040g-tf* $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          ls -lh $GITHUB_WORKSPACE/output/
+
+      - name: Generate Release Tag
+        id: tag
+        run: |
+          echo "release_tag=AutoBuild-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          echo "release_date=$(date +"%Y-%m-%d %H:%M")" >> $GITHUB_ENV
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: "XG-040G-TF 全能固件 [${{ env.release_date }}]"
+          body: |
+            ### 固件说明
+            * **机型**: Nokia XG-040G-TF (达发 AN7581)
+            * **上游源码**: 同步至 `pbs05/ponwrt` 最新主分支
+            * **核心功能**: NPU (PPE) 硬件加速、CPU 动态调频与温度监控面板、DMZ 主机、计划任务(休眠控制)
+            * **刷机注意**: U-Boot 网页初次刷机请务必选择以 `...factory.itb` 结尾的文件！
+          files: output/*
