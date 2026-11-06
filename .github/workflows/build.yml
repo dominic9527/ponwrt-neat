@@ -1,19 +1,52 @@
 name: Build Pure Nokia XG-040G
 
 on:
-  workflow_dispatch: # 支持网页上手动点击一键运行
+  workflow_dispatch: # 保留手动在网页端点击一键编译的按钮
+  schedule:
+    # 每天北京时间早上 4:00 (UTC 时间 20:00) 自动检查一次上游是否有更新
+    - cron: '0 20 * * *'
 
 permissions: write-all
 
 jobs:
-  build:
-    name: Build Firmware
+  check-and-build:
+    name: Check Upstream & Build
     runs-on: ubuntu-latest
     steps:
       - name: 检出当前仓库
         uses: actions/checkout@v4
 
+      - name: 检查上游源码更新
+        id: check
+        run: |
+          # 获取上游 pbs05/ponwrt 仓库 master 分支的最新 commit hash
+          UPSTREAM_HASH=$(curl -s "https://api.github.com/repos/pbs05/ponwrt/commits/master" | jq -r .sha)
+          echo "上游最新 Commit Hash: $UPSTREAM_HASH"
+          
+          # 读取本地记录的旧 Hash (如果文件不存在则为空)
+          LOCAL_HASH=""
+          if [ -f .upstream_hash ]; then
+            LOCAL_HASH=$(cat .upstream_hash)
+          fi
+          echo "本地上次 Commit Hash: $LOCAL_HASH"
+
+          # 如果是手动点击(workflow_dispatch)，或者上游产生了新提交，则继续编译
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$UPSTREAM_HASH" != "$LOCAL_HASH" ]; then
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+            echo "$UPSTREAM_HASH" > .upstream_hash
+            # 将最新的 hash 提交回当前仓库，作为下次对比的依据
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            git add .upstream_hash
+            git commit -m "chore: 更新上游追踪 Hash 至 $UPSTREAM_HASH" || true
+            git push || true
+          else
+            echo "上游源码没有更新，本次跳过编译。"
+            echo "build_needed=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: 初始化编译环境
+        if: steps.check.outputs.build_needed == 'true'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -27,16 +60,19 @@ jobs:
           ln -s /mnt/build_wrt wrt
 
       - name: 克隆 PON 专有源码
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           git clone --depth=1 --single-branch --branch master https://github.com/pbs05/ponwrt.git wrt
 
       - name: 更新 Feeds 官方依赖
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: 拉取专属插件 (NPU、IPTV秒切、CPU调频)
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt/package
           # 1. 达发 NPU 硬件加速与监控面板
@@ -51,6 +87,7 @@ jobs:
           rm -rf temp_luci
 
       - name: 注入配置与环境微调
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           # 修复网口映射与 DTS 补丁
@@ -65,17 +102,20 @@ jobs:
           make defconfig
 
       - name: 下载编译依赖包
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           make download -j$(nproc)
 
       - name: 开始编译固件
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           make -j$(nproc) || make -j1 V=s
 
       - name: 整理打包产物 (双保险提取)
         id: organize
+        if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           mkdir -p upload_firmware
@@ -88,12 +128,14 @@ jobs:
           echo "BUILD_DATE=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
       - name: 发布 Release
+        if: steps.check.outputs.build_needed == 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: Nokia-XG-040G-${{ env.BUILD_DATE }}
           files: wrt/upload_firmware/*
           body: |
             ### 专为 Nokia XG-040G 定制的极致纯净固件
+            - **自动触发来源**：监测到上游 `pbs05/ponwrt` 仓库更新并全自动编译
             - **PON 驱动**：完整光口识别与 VLAN 透传支持
             - **硬件加速**：内置 Airoha NPU (PPE) 看板
             - **IPTV 秒切**：内置 msd_lite 极速单播转发引擎
