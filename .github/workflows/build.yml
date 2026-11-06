@@ -50,11 +50,12 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 3. 直接克隆到 package 原生目录，避免 feeds 索引缺失
+          # 3. 直接克隆到 package 原生目录
           git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
 
-          # 4. 关键：解除 Makefile 中的架构限制（防止 defconfig 将其当作不兼容平台剔除）
-          sed -i 's/DEPENDS:=+.*@TARGET_.*/DEPENDS:=+luci-base/g' package/luci-app-airoha-npu/Makefile 2>/dev/null || true
+          # 4. 彻底消除 Makefile 中的架构锁与 Target 限制 (涵盖 LUCI_DEPENDS 和 DEPENDS)
+          sed -i -E 's/@TARGET_[a-zA-Z0-9_]+//g' package/luci-app-airoha-npu/Makefile 2>/dev/null || true
+          sed -i -E 's/(LUCI_)?DEPENDS:=.*/\1DEPENDS:=+luci-base/g' package/luci-app-airoha-npu/Makefile 2>/dev/null || true
 
           # 5. 清理包信息缓存，强迫系统全盘重新建立包关系索引
           rm -rf tmp/
@@ -83,11 +84,53 @@ jobs:
           # 核心校验：输出检查结果
           echo "=========================================="
           echo "检查核心配置状态："
-          grep -E "CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-cpufreq|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: NPU 配置依然丢失！"
+          grep -E "CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-cpufreq|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: 核心配置依然丢失！"
           echo "=========================================="
 
       - name: Download Package Sources
         run: |
           cd openwrt
           make download -j8
-          find dl -size -1024c -exec rm -f
+          # 修复转义符报错：使用原生的 -delete 替代 -exec rm
+          find dl -size -1024c -delete
+
+      - name: Compile Firmware
+        run: |
+          cd openwrt
+          echo "Starting compilation with $(nproc) threads..."
+          # 优先独立编译 NPU 插件产出安装包作为双重兜底
+          make package/luci-app-airoha-npu/compile V=s || true
+          # 编译主系统固件
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Organize Artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          cd openwrt/bin/targets/airoha/an7581
+          # 收集固件镜像与校验清单
+          cp *xg-040g-tf* $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          # 搜集独立 ipk 包
+          find $GITHUB_WORKSPACE/openwrt/bin/ -name "*airoha*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/openwrt/bin/ -name "*cpufreq*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          ls -lh $GITHUB_WORKSPACE/output/
+
+      - name: Generate Release Tag
+        id: tag
+        run: |
+          echo "release_tag=AutoBuild-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          echo "release_date=$(date +"%Y-%m-%d %H:%M")" >> $GITHUB_ENV
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: "XG-040G-TF 全能固件 [${{ env.release_date }}]"
+          body: |
+            ### 固件说明
+            * **机型**: Nokia XG-040G-TF (达发 AN7581)
+            * **上游源码**: 同步至 `pbs05/ponwrt` 最新主分支
+            * **核心特性**: 达发 AN7581 NPU (PPE) 硬件加速、CPU 实时频率与温度监控面板、动态节能调频支持、IPTV 高性能转发
+            * **刷机说明**: 
+              * 原厂 U-Boot 网页初次刷入请选 `...factory.itb`
+              * 系统内后台升级请选 `...sysupgrade.itb`
+          files: output/*
