@@ -1,16 +1,16 @@
 name: Build Pure Nokia XG-040G
 
 on:
-  workflow_dispatch: # 保留手动在网页端点击一键编译的按钮
+  workflow_dispatch: # 支持在 GitHub 网页上手动点击一键编译
   schedule:
-    # 每天北京时间早上 4:00 (UTC 时间 20:00) 自动检查一次上游是否有更新
+    # 每天北京时间早上 4:00 (UTC 20:00) 自动检测上游更新
     - cron: '0 20 * * *'
 
 permissions: write-all
 
 jobs:
   check-and-build:
-    name: Check Upstream & Build
+    name: Build Firmware
     runs-on: ubuntu-latest
     steps:
       - name: 检出当前仓库
@@ -19,22 +19,18 @@ jobs:
       - name: 检查上游源码更新
         id: check
         run: |
-          # 获取上游 pbs05/ponwrt 仓库 master 分支的最新 commit hash
           UPSTREAM_HASH=$(curl -s "https://api.github.com/repos/pbs05/ponwrt/commits/master" | jq -r .sha)
           echo "上游最新 Commit Hash: $UPSTREAM_HASH"
           
-          # 读取本地记录的旧 Hash (如果文件不存在则为空)
           LOCAL_HASH=""
           if [ -f .upstream_hash ]; then
             LOCAL_HASH=$(cat .upstream_hash)
           fi
           echo "本地上次 Commit Hash: $LOCAL_HASH"
 
-          # 如果是手动点击(workflow_dispatch)，或者上游产生了新提交，则继续编译
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$UPSTREAM_HASH" != "$LOCAL_HASH" ]; then
             echo "build_needed=true" >> $GITHUB_OUTPUT
             echo "$UPSTREAM_HASH" > .upstream_hash
-            # 将最新的 hash 提交回当前仓库，作为下次对比的依据
             git config --local user.email "action@github.com"
             git config --local user.name "GitHub Action"
             git add .upstream_hash
@@ -71,37 +67,29 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 拉取专属插件 (NPU、IPTV秒切、CPU调频)
+      - name: 拉取专属插件 (NPU 看板与 IPTV 秒切)
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt/package
-          # 1. 达发 NPU 硬件加速与监控面板
+          # 1. 达发 NPU (PPE) 硬件加速与监控看板
           git clone --depth=1 https://github.com/luanmuc/luci-app-airoha-npu.git
-          # 2. IPTV 极速转流引擎 (msd_lite)
-          git clone --depth=1 https://github.com/gspotx2f/packages-openwrt.git temp_pkg
-          cp -r temp_pkg/msd_lite ./
-          rm -rf temp_pkg
-          # 3. CPU 调频与温控 (luci-app-cpufreq)
-          git clone --depth=1 -b openwrt-24.10 https://github.com/immortalwrt/luci.git temp_luci
-          cp -r temp_luci/applications/luci-app-cpufreq ./
-          rm -rf temp_luci
+          # 2. IPTV 极速转流引擎与 LuCI 控制面板
+          git clone --depth=1 https://github.com/ximiTech/luci-app-msd_lite.git
+          # 注：cpufreq 和 igmpproxy 已由官方 feeds 自动提供
 
-      - name: 注入配置与环境微调
+      - name: 注入配置与网口调整
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          # 修复网口映射与 DTS 补丁
+          # 针对 Nokia XG-040G 网口映射与 DTS 补丁调整
           sed -i 's/ucidef_set_interface_lan "lan1 lan2 lan3 lan4"/ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"/g' target/linux/airoha/an7581/base-files/etc/board.d/02_network || true
           sed -i 's/interrupts.*//g' target/linux/airoha/dts/an7581-nokia_xg-040g-md-common.dtsi || true
 
-          # 修改默认 IP 为 192.168.1.1
-          sed -i 's/192.168.1.1/192.168.1.1/g' package/base-files/files/bin/config_generate
-
-          # 拷贝仓库根目录的 .config
+          # 载入根目录自定义 .config
           cp -f ../.config .config
           make defconfig
 
-      - name: 下载编译依赖包
+      - name: 下载依赖软件包
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
@@ -113,16 +101,16 @@ jobs:
           cd wrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理打包产物 (双保险提取)
+      - name: 整理打包产物 (含双保险备份)
         id: organize
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           mkdir -p upload_firmware
-          # 提取刷机固件镜像
+          # 提取刷机固件镜像 (.ubi / .itb)
           find bin/targets/ -type f -name "*xg-040g*ubi*" -exec cp -f {} upload_firmware/ \;
           find bin/targets/ -type f -name "*nokia*.itb*" -exec cp -f {} upload_firmware/ \;
-          # 【双保险】独立提取 NPU、IPTV、调频插件的 ipk，防止底包遗漏
+          # 【双保险】独立提取核心功能 ipk 安装包以备单独安装
           find bin/packages/ -type f -iregex ".*\(airoha-npu\|cpufreq\|msd_lite\).*\.ipk" -exec cp -f {} upload_firmware/ \;
           
           echo "BUILD_DATE=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
@@ -134,10 +122,9 @@ jobs:
           tag_name: Nokia-XG-040G-${{ env.BUILD_DATE }}
           files: wrt/upload_firmware/*
           body: |
-            ### 专为 Nokia XG-040G 定制的极致纯净固件
-            - **自动触发来源**：监测到上游 `pbs05/ponwrt` 仓库更新并全自动编译
-            - **PON 驱动**：完整光口识别与 VLAN 透传支持
-            - **硬件加速**：内置 Airoha NPU (PPE) 看板
-            - **IPTV 秒切**：内置 msd_lite 极速单播转发引擎
-            - **温控调频**：开启 DEVMEM 读取，支持 CPU 调频控温
-            - **双保险**：若底包未默认加载，可使用附带的独立 IPK 手动安装
+            ### Nokia XG-040G 定制纯净转发固件
+            - **底层核心**：基于 pbs05/ponwrt 源码编译
+            - **NPU 加速**：集成 Airoha NPU 看板
+            - **IPTV 转流**：集成 msd_lite 与 igmpproxy（支持秒级切台）
+            - **硬件监控**：集成 CPU 调频与温度传感器（开启 DEVMEM）
+            - **双保险文件**：若底包功能未默认加载，可使用附带的独立 IPK 文件手动安装
