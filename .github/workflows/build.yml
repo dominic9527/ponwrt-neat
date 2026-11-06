@@ -42,27 +42,35 @@ jobs:
 
       - name: Clone PONWrt Upstream & Custom Packages
         run: |
-          # 1. 拉取 pbs05 上游源码
+          # 1. 克隆上游源码
           git clone --depth 1 https://github.com/pbs05/ponwrt.git openwrt
           cd openwrt
 
-          # 2. 更新并安装官方 feeds
+          # 2. 准备本地自定义 Feed 仓库
+          mkdir -p custom-feeds
+          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git custom-feeds/luci-app-airoha-npu
+
+          # 3. 将本地目录以最高优先级注册为官方 feed 源
+          echo "src-link custom $(pwd)/custom-feeds" >> feeds.conf.default
+
+          # 4. 更新并安装所有 feeds（此时 custom 插件会被完整注册进全局索引）
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-          # 3. 引入 Airoha NPU 前端与 CPU 调频仪表盘插件
-          mkdir -p package/custom
-          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git package/custom/luci-app-airoha-npu
 
       - name: Apply Configuration & Validate NPU
         run: |
           cd openwrt
-          # 导入自定义基础 .config
+          # 导入基础配置
           cp ../.config .config
 
-          # 强行锁定关键核心配置，避免任何依赖计算将其剔除
-          cat << 'EOF' >> .config
-          CONFIG_PACKAGE_luci-app-airoha-npu=y
+          # 自动解析 Makefile 内声明的真实包名，防止包名大小写或下划线不匹配
+          PKG_NAME=$(grep -oE "Package/luci-app-[a-zA-Z0-9_-]+" custom-feeds/luci-app-airoha-npu/Makefile | head -n 1 | cut -d/ -f2)
+          [ -z "$PKG_NAME" ] && PKG_NAME="luci-app-airoha-npu"
+          echo ">>> 提取到 NPU 插件真实包名: $PKG_NAME"
+
+          # 强行锁定核心功能与依赖驱动
+          cat << EOF >> .config
+          CONFIG_PACKAGE_${PKG_NAME}=y
           CONFIG_KERNEL_DEVMEM=y
           CONFIG_BUSYBOX_CONFIG_DEVMEM=y
           CONFIG_PACKAGE_kmod-cpufreq-governor=y
@@ -73,10 +81,10 @@ jobs:
           # 生成最终依赖树
           make defconfig
 
-          # 验证检查：在 Actions 日志中直接显示该插件是否成功激活为 =y
+          # 核心校验：输出检查结果
           echo "=========================================="
-          echo "检查 NPU 与 CPU 核心配置状态："
-          grep -E "CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: NPU 配置丢失！"
+          echo "检查核心配置状态："
+          grep -E "CONFIG_PACKAGE_luci-app.*npu|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: NPU 配置依然丢失！"
           echo "=========================================="
 
       - name: Download Package Sources
@@ -95,9 +103,11 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
           cd openwrt/bin/targets/airoha/an7581
+          # 收集固件镜像与校验单
           cp *xg-040g-tf* $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          # 同时收集编译出来的 ipk，方便后续手动备份或独立提取
-          find $GITHUB_WORKSPACE/openwrt/bin/packages/ -name "luci-app-airoha-npu*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          # 递归收集编译出的所有 luci 插件独立 ipk/apk 包（作为双重备份）
+          find $GITHUB_WORKSPACE/openwrt/bin/ -name "*airoha*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/openwrt/bin/ -name "*airoha*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           ls -lh $GITHUB_WORKSPACE/output/
 
       - name: Generate Release Tag
@@ -115,8 +125,8 @@ jobs:
             ### 固件说明
             * **机型**: Nokia XG-040G-TF (达发 AN7581)
             * **上游源码**: 同步至 `pbs05/ponwrt` 最新主分支
-            * **核心功能**: 达发 AN7581 NPU (PPE) 硬件加速、CPU 实时频率与温度监控面板、动态节能调频支持
-            * **刷机文件**: 
-              * 初次从原厂 U-Boot 网页刷入请选择 `...factory.itb` 镜像
-              * 已在 OpenWrt 系统内升级请选择 `...sysupgrade.itb` 镜像
+            * **核心特性**: 达发 AN7581 NPU (PPE) 硬件加速、CPU 实时频率与温度监控面板、动态节能调频支持
+            * **刷机说明**: 
+              * 原厂 U-Boot 网页初次刷入请选 `...factory.itb`
+              * 系统内后台升级请选 `...sysupgrade.itb`
           files: output/*
