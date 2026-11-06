@@ -75,7 +75,6 @@ jobs:
           git clone --depth=1 https://github.com/luanmuc/luci-app-airoha-npu.git
           # 2. IPTV 极速转流引擎与 LuCI 控制面板
           git clone --depth=1 https://github.com/ximiTech/luci-app-msd_lite.git
-          # 注：cpufreq 和 igmpproxy 已由官方 feeds 自动提供
 
       - name: 注入配置与网口调整
         if: steps.check.outputs.build_needed == 'true'
@@ -85,8 +84,18 @@ jobs:
           sed -i 's/ucidef_set_interface_lan "lan1 lan2 lan3 lan4"/ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"/g' target/linux/airoha/an7581/base-files/etc/board.d/02_network || true
           sed -i 's/interrupts.*//g' target/linux/airoha/dts/an7581-nokia_xg-040g-md-common.dtsi || true
 
-          # 载入根目录自定义 .config
-          cp -f ../.config .config
+          # 绝对路径精准定位配置文件 (优先 nokia.config，备选 .config)
+          if [ -f "$GITHUB_WORKSPACE/nokia.config" ]; then
+            echo "已成功找到 $GITHUB_WORKSPACE/nokia.config，正在写入配置..."
+            cp -f "$GITHUB_WORKSPACE/nokia.config" .config
+          elif [ -f "$GITHUB_WORKSPACE/.config" ]; then
+            echo "已成功找到 $GITHUB_WORKSPACE/.config，正在写入配置..."
+            cp -f "$GITHUB_WORKSPACE/.config" .config
+          else
+            echo "::error::未在仓库根目录找到 nokia.config 或 .config 文件！"
+            exit 1
+          fi
+
           make defconfig
 
       - name: 下载依赖软件包
