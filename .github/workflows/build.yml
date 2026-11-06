@@ -46,16 +46,18 @@ jobs:
           git clone --depth 1 https://github.com/pbs05/ponwrt.git openwrt
           cd openwrt
 
-          # 2. 准备本地自定义 Feed 仓库
-          mkdir -p custom-feeds
-          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git custom-feeds/luci-app-airoha-npu
-
-          # 3. 将本地目录以最高优先级注册为官方 feed 源
-          echo "src-link custom $(pwd)/custom-feeds" >> feeds.conf.default
-
-          # 4. 更新并安装所有 feeds（此时 custom 插件会被完整注册进全局索引）
+          # 2. 正常更新并安装官方基础 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+          # 3. 直接克隆到 package 原生目录，避免 feeds 索引缺失
+          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+
+          # 4. 关键：解除 Makefile 中的架构限制（防止 defconfig 将其当作不兼容平台剔除）
+          sed -i 's/DEPENDS:=+.*@TARGET_.*/DEPENDS:=+luci-base/g' package/luci-app-airoha-npu/Makefile 2>/dev/null || true
+
+          # 5. 清理包信息缓存，强迫系统全盘重新建立包关系索引
+          rm -rf tmp/
 
       - name: Apply Configuration & Validate NPU
         run: |
@@ -63,14 +65,11 @@ jobs:
           # 导入基础配置
           cp ../.config .config
 
-          # 自动解析 Makefile 内声明的真实包名，防止包名大小写或下划线不匹配
-          PKG_NAME=$(grep -oE "Package/luci-app-[a-zA-Z0-9_-]+" custom-feeds/luci-app-airoha-npu/Makefile | head -n 1 | cut -d/ -f2)
-          [ -z "$PKG_NAME" ] && PKG_NAME="luci-app-airoha-npu"
-          echo ">>> 提取到 NPU 插件真实包名: $PKG_NAME"
-
           # 强行锁定核心功能与依赖驱动
-          cat << EOF >> .config
-          CONFIG_PACKAGE_${PKG_NAME}=y
+          cat << 'EOF' >> .config
+          CONFIG_PACKAGE_luci-app-airoha-npu=y
+          CONFIG_PACKAGE_luci-app-cpufreq=y
+          CONFIG_PACKAGE_luci-i18n-cpufreq-zh-cn=y
           CONFIG_KERNEL_DEVMEM=y
           CONFIG_BUSYBOX_CONFIG_DEVMEM=y
           CONFIG_PACKAGE_kmod-cpufreq-governor=y
@@ -84,49 +83,11 @@ jobs:
           # 核心校验：输出检查结果
           echo "=========================================="
           echo "检查核心配置状态："
-          grep -E "CONFIG_PACKAGE_luci-app.*npu|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: NPU 配置依然丢失！"
+          grep -E "CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-cpufreq|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: NPU 配置依然丢失！"
           echo "=========================================="
 
       - name: Download Package Sources
         run: |
           cd openwrt
           make download -j8
-          find dl -size -1024c -exec rm -f {} \;
-
-      - name: Compile Firmware
-        run: |
-          cd openwrt
-          echo "Starting compilation with $(nproc) threads..."
-          make -j$(nproc) || make -j1 V=s
-
-      - name: Organize Artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          cd openwrt/bin/targets/airoha/an7581
-          # 收集固件镜像与校验单
-          cp *xg-040g-tf* $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          # 递归收集编译出的所有 luci 插件独立 ipk/apk 包（作为双重备份）
-          find $GITHUB_WORKSPACE/openwrt/bin/ -name "*airoha*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/openwrt/bin/ -name "*airoha*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          ls -lh $GITHUB_WORKSPACE/output/
-
-      - name: Generate Release Tag
-        id: tag
-        run: |
-          echo "release_tag=AutoBuild-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-          echo "release_date=$(date +"%Y-%m-%d %H:%M")" >> $GITHUB_ENV
-
-      - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.release_tag }}
-          name: "XG-040G-TF 全能固件 [${{ env.release_date }}]"
-          body: |
-            ### 固件说明
-            * **机型**: Nokia XG-040G-TF (达发 AN7581)
-            * **上游源码**: 同步至 `pbs05/ponwrt` 最新主分支
-            * **核心特性**: 达发 AN7581 NPU (PPE) 硬件加速、CPU 实时频率与温度监控面板、动态节能调频支持
-            * **刷机说明**: 
-              * 原厂 U-Boot 网页初次刷入请选 `...factory.itb`
-              * 系统内后台升级请选 `...sysupgrade.itb`
-          files: output/*
+          find dl -size -1024c -exec rm -f
