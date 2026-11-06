@@ -40,20 +40,44 @@ jobs:
             python3-pip python3-ply python3-docutils python3-pyelftools rsync subversion swig texinfo \
             uglifyjs upx-ucl unzip vim wget xxd zlib1g-dev zstd
 
-      - name: Clone PONWrt Upstream & NPU Plugin
+      - name: Clone PONWrt Upstream & Custom Packages
         run: |
-          # 每次运行都会拉取 pbs05 的最新源码，实现自动更新
+          # 1. 拉取 pbs05 上游源码
           git clone --depth 1 https://github.com/pbs05/ponwrt.git openwrt
-          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git openwrt/package/luci-app-airoha-npu
           cd openwrt
+
+          # 2. 更新并安装官方 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Apply Configuration
+          # 3. 引入 Airoha NPU 前端与 CPU 调频仪表盘插件
+          mkdir -p package/custom
+          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git package/custom/luci-app-airoha-npu
+
+      - name: Apply Configuration & Validate NPU
         run: |
-          cp .config openwrt/.config
           cd openwrt
+          # 导入自定义基础 .config
+          cp ../.config .config
+
+          # 强行锁定关键核心配置，避免任何依赖计算将其剔除
+          cat << 'EOF' >> .config
+          CONFIG_PACKAGE_luci-app-airoha-npu=y
+          CONFIG_KERNEL_DEVMEM=y
+          CONFIG_BUSYBOX_CONFIG_DEVMEM=y
+          CONFIG_PACKAGE_kmod-cpufreq-governor=y
+          CONFIG_PACKAGE_kmod-hwmon-core=y
+          CONFIG_PACKAGE_lm-sensors=y
+          EOF
+
+          # 生成最终依赖树
           make defconfig
+
+          # 验证检查：在 Actions 日志中直接显示该插件是否成功激活为 =y
+          echo "=========================================="
+          echo "检查 NPU 与 CPU 核心配置状态："
+          grep -E "CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_KERNEL_DEVMEM" .config || echo "CRITICAL: NPU 配置丢失！"
+          echo "=========================================="
 
       - name: Download Package Sources
         run: |
@@ -72,6 +96,8 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/output
           cd openwrt/bin/targets/airoha/an7581
           cp *xg-040g-tf* $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          # 同时收集编译出来的 ipk，方便后续手动备份或独立提取
+          find $GITHUB_WORKSPACE/openwrt/bin/packages/ -name "luci-app-airoha-npu*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           ls -lh $GITHUB_WORKSPACE/output/
 
       - name: Generate Release Tag
@@ -89,6 +115,8 @@ jobs:
             ### 固件说明
             * **机型**: Nokia XG-040G-TF (达发 AN7581)
             * **上游源码**: 同步至 `pbs05/ponwrt` 最新主分支
-            * **核心功能**: NPU (PPE) 硬件加速、CPU 动态调频与温度监控面板、DMZ 主机、计划任务(休眠控制)
-            * **刷机注意**: U-Boot 网页初次刷机请务必选择以 `...factory.itb` 结尾的文件！
+            * **核心功能**: 达发 AN7581 NPU (PPE) 硬件加速、CPU 实时频率与温度监控面板、动态节能调频支持
+            * **刷机文件**: 
+              * 初次从原厂 U-Boot 网页刷入请选择 `...factory.itb` 镜像
+              * 已在 OpenWrt 系统内升级请选择 `...sysupgrade.itb` 镜像
           files: output/*
