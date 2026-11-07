@@ -40,6 +40,23 @@ jobs:
             echo "build_needed=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: 暴力释放磁盘空间 (防止编译因空间不足中断)
+        if: steps.check.outputs.build_needed == 'true'
+        run: |
+          echo "清理前的磁盘空间："
+          df -hT
+          # 删除不需要的重型预装环境，释放超 30GB 空间
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/share/chromium
+          # 清理无用的 Docker 镜像
+          sudo docker image prune --all --force
+          echo "清理后的磁盘空间："
+          df -hT
+
       - name: 初始化编译环境
         if: steps.check.outputs.build_needed == 'true'
         env:
@@ -114,7 +131,7 @@ jobs:
           mkdir -p upload_firmware
 
           echo "=== 1. 查找生成的系统镜像 ==="
-          # 放宽匹配条件，只要是以 .bin, .ubi, .itb, .img 结尾的刷机包全抓走
+          # 放宽匹配条件，只要是以 .bin, .ubi, .itb, .img, .tar 结尾的刷机包全抓走
           find bin/targets/ -type f -iregex ".*\.\(bin\|ubi\|itb\|img\|tar\)$" -exec cp -f {} upload_firmware/ \;
 
           echo "=== 2. 查找关键插件 IPK ==="
