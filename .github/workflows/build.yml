@@ -46,16 +46,17 @@ jobs:
         if: steps.check.outputs.build_needed == 'true'
         run: |
           echo "=== 1. 清理无用预装环境 ==="
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/powershell || true
+          sudo rm -rf /usr/local/share/chromium || true
           df -hT
 
-          echo "=== 2. 挂载 12GB Swap 虚拟内存防止编译 OOM ==="
-          sudo fallocate -l 12G /swapfile
+          echo "=== 2. 创建 12GB Swap 虚拟内存 (使用安全的 dd 模式) ==="
+          # 使用 dd 强行写入 12GB 文件，防止 fallocate 遇到稀疏文件报错
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -140,10 +141,12 @@ jobs:
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: 开始编译固件
+      - name: 开始编译固件并监控底层状态
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
+          # 启动后台监控：如果 OOM 会在日志中抓取到记录
+          (while true; do dmesg -T | grep -i -E "oom|out of memory|killed process"; sleep 10; done) &
           make -j$(nproc) || make -j1 V=s
 
       - name: 整理打包产物 (双保险提取与防空包机制)
@@ -156,7 +159,7 @@ jobs:
           echo "=== 1. 查看 bin/targets/ 下实际生成的所有文件 ==="
           find bin/targets/ -type f
 
-          echo "=== 2. 提取所有系统刷机镜像 (.itb / .bin / .ubi / .fip / .img) ==="
+          echo "=== 2. 提取所有系统刷机镜像 (.itb / .bin / .ubi / .fip / .img / .tar) ==="
           find bin/targets/ -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.ubi" -o -name "*.fip" -o -name "*.img*" -o -name "*.tar*" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
 
           echo "=== 3. 提取关键插件独立安装包 (.ipk / .apk 双格式兼容) ==="
