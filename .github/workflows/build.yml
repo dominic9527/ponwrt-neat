@@ -54,12 +54,12 @@ jobs:
           sudo rm -rf /usr/local/share/chromium || true
           df -hT
 
-          echo "=== 2. 创建 12GB Swap 虚拟内存 (使用安全的 dd 模式) ==="
-          # 使用 dd 强行写入 12GB 文件，防止 fallocate 遇到稀疏文件报错
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          echo "=== 2. 创建 12GB Swap 虚拟内存 (避开系统默认占用) ==="
+          # 更改文件名为 /mnt/swapfile-extra，与系统默认的 /swapfile 叠加，避免冲突
+          sudo dd if=/dev/zero of=/mnt/swapfile-extra bs=1M count=12288 status=progress
+          sudo chmod 600 /mnt/swapfile-extra
+          sudo mkswap /mnt/swapfile-extra
+          sudo swapon /mnt/swapfile-extra
           free -h
 
       - name: 初始化编译环境 (已剔除会导致失联的 full-upgrade)
@@ -149,43 +149,4 @@ jobs:
           (while true; do dmesg -T | grep -i -E "oom|out of memory|killed process"; sleep 10; done) &
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理打包产物 (双保险提取与防空包机制)
-        id: organize
-        if: steps.check.outputs.build_needed == 'true'
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/upload_firmware"
-          cd wrt
-
-          echo "=== 1. 查看 bin/targets/ 下实际生成的所有文件 ==="
-          find bin/targets/ -type f
-
-          echo "=== 2. 提取所有系统刷机镜像 (.itb / .bin / .ubi / .fip / .img / .tar) ==="
-          find bin/targets/ -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.ubi" -o -name "*.fip" -o -name "*.img*" -o -name "*.tar*" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
-
-          echo "=== 3. 提取关键插件独立安装包 (.ipk / .apk 双格式兼容) ==="
-          find bin/ -type f \( -name "*airoha-npu*" -o -name "*msd_lite*" -o -name "*cpufreq*" -o -name "*igmpproxy*" \) \( -name "*.ipk" -o -name "*.apk" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
-
-          echo "=== 4. 检查最终准备上传的文件列表 ==="
-          ls -lh "$GITHUB_WORKSPACE/upload_firmware/"
-
-          # 如果没有抓到任何文件，直接报错终止，绝不发布空 Release
-          if [ -z "$(ls -A "$GITHUB_WORKSPACE/upload_firmware")" ]; then
-            echo "::error::未提取到任何固件文件，请检查上方 bin/targets/ 目录输出！"
-            exit 1
-          fi
-
-          echo "BUILD_DATE=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
-
-      - name: 发布 Release
-        if: steps.check.outputs.build_needed == 'true'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: Nokia-XG-040G-${{ env.BUILD_DATE }}
-          files: ${{ github.workspace }}/upload_firmware/*
-          body: |
-            ### Nokia XG-040G 定制纯净转发固件
-            - **底层核心**：基于 pbs05/ponwrt 源码编译
-            - **NPU 加速**：集成 Airoha NPU (PPE) 状态看板
-            - **IPTV 转流**：集成 msd_lite 与 igmpproxy
-            - **硬件监控**：集成 CPU 调频与温度传感器
-            - **独立安装包**：附带核心插件的独立安装包（.ipk / .apk）作为双保险备份
+      - name: 整理打包产
