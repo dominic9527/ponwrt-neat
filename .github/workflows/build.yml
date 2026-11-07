@@ -1,9 +1,8 @@
 name: Build Pure Nokia XG-040G
 
 on:
-  workflow_dispatch: # 支持在 GitHub 网页上手动点击一键编译
+  workflow_dispatch:
   schedule:
-    # 每天北京时间早上 4:00 (UTC 20:00) 自动检测上游更新
     - cron: '0 20 * * *'
 
 permissions: write-all
@@ -71,28 +70,25 @@ jobs:
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt/package
-          # 1. 达发 NPU (PPE) 硬件加速与监控看板
+          # 1. 达发 NPU 监控看板
           git clone --depth=1 https://github.com/luanmuc/luci-app-airoha-npu.git
-          # 2. IPTV 极速转流引擎与 LuCI 控制面板
+          # 2. IPTV 极速转流引擎 msd_lite
           git clone --depth=1 https://github.com/ximiTech/luci-app-msd_lite.git
 
       - name: 注入配置与网口调整
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          # 针对 Nokia XG-040G 网口映射与 DTS 补丁调整
+          # 修复 Nokia XG-040G 网口映射与 DTS 补丁
           sed -i 's/ucidef_set_interface_lan "lan1 lan2 lan3 lan4"/ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"/g' target/linux/airoha/an7581/base-files/etc/board.d/02_network || true
           sed -i 's/interrupts.*//g' target/linux/airoha/dts/an7581-nokia_xg-040g-md-common.dtsi || true
 
-          # 绝对路径精准定位配置文件 (优先 nokia.config，备选 .config)
-          if [ -f "$GITHUB_WORKSPACE/nokia.config" ]; then
-            echo "已成功找到 $GITHUB_WORKSPACE/nokia.config，正在写入配置..."
-            cp -f "$GITHUB_WORKSPACE/nokia.config" .config
-          elif [ -f "$GITHUB_WORKSPACE/.config" ]; then
-            echo "已成功找到 $GITHUB_WORKSPACE/.config，正在写入配置..."
+          # 使用 GitHub 绝对路径读取你根目录的 .config 文件，彻底避免路径报错
+          if [ -f "$GITHUB_WORKSPACE/.config" ]; then
+            echo "成功找到根目录下的 .config，正在写入配置..."
             cp -f "$GITHUB_WORKSPACE/.config" .config
           else
-            echo "::error::未在仓库根目录找到 nokia.config 或 .config 文件！"
+            echo "::error::未找到 .config 文件，请检查仓库根目录是否包含了此文件！"
             exit 1
           fi
 
@@ -110,18 +106,32 @@ jobs:
           cd wrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理打包产物 (含双保险备份)
+      - name: 整理打包产物 (双保险提取与防空包机制)
         id: organize
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
           mkdir -p upload_firmware
-          # 提取刷机固件镜像 (.ubi / .itb)
-          find bin/targets/ -type f -name "*xg-040g*ubi*" -exec cp -f {} upload_firmware/ \;
-          find bin/targets/ -type f -name "*nokia*.itb*" -exec cp -f {} upload_firmware/ \;
-          # 【双保险】独立提取核心功能 ipk 安装包以备单独安装
-          find bin/packages/ -type f -iregex ".*\(airoha-npu\|cpufreq\|msd_lite\).*\.ipk" -exec cp -f {} upload_firmware/ \;
-          
+
+          echo "=== 1. 查找生成的系统镜像 ==="
+          # 放宽匹配条件，只要是以 .bin, .ubi, .itb, .img 结尾的刷机包全抓走
+          find bin/targets/ -type f -iregex ".*\.\(bin\|ubi\|itb\|img\|tar\)$" -exec cp -f {} upload_firmware/ \;
+
+          echo "=== 2. 查找关键插件 IPK ==="
+          # 在全局范围内把需要的 IPK 抓取到打包目录
+          find bin/ -type f -name "*airoha-npu*.ipk" -exec cp -f {} upload_firmware/ \;
+          find bin/ -type f -name "*msd_lite*.ipk" -exec cp -f {} upload_firmware/ \;
+          find bin/ -type f -name "*cpufreq*.ipk" -exec cp -f {} upload_firmware/ \;
+
+          echo "=== 3. 检查最终准备上传的文件列表 ==="
+          ls -lh upload_firmware/
+
+          # 如果文件夹为空，直接报错中断，防止在网页端生成一个空的 Release
+          if [ -z "$(ls -A upload_firmware)" ]; then
+            echo "::error::未提取到任何固件文件或插件，构建失败，请检查编译过程！"
+            exit 1
+          fi
+
           echo "BUILD_DATE=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
       - name: 发布 Release
@@ -134,6 +144,5 @@ jobs:
             ### Nokia XG-040G 定制纯净转发固件
             - **底层核心**：基于 pbs05/ponwrt 源码编译
             - **NPU 加速**：集成 Airoha NPU 看板
-            - **IPTV 转流**：集成 msd_lite 与 igmpproxy（支持秒级切台）
-            - **硬件监控**：集成 CPU 调频与温度传感器（开启 DEVMEM）
-            - **双保险文件**：若底包功能未默认加载，可使用附带的独立 IPK 文件手动安装
+            - **IPTV 转流**：集成 msd_lite 与 igmpproxy
+            - **硬件监控**：集成 CPU 调频与温度传感器
