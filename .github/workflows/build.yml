@@ -55,22 +55,21 @@ jobs:
           df -hT
 
           echo "=== 2. 创建 12GB Swap 虚拟内存 (避开系统默认占用) ==="
-          # 更改文件名为 /mnt/swapfile-extra，与系统默认的 /swapfile 叠加，避免冲突
           sudo dd if=/dev/zero of=/mnt/swapfile-extra bs=1M count=12288 status=progress
           sudo chmod 600 /mnt/swapfile-extra
           sudo mkswap /mnt/swapfile-extra
           sudo swapon /mnt/swapfile-extra
           free -h
 
-      - name: 初始化编译环境 (已剔除会导致失联的 full-upgrade)
+      - name: 初始化编译环境 (加入 ccache 支持)
         if: steps.check.outputs.build_needed == 'true'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo -E apt-get update -y
-          sudo -E apt-get install -y dos2unix libfuse-dev jq curl git
+          # 新增了 ccache 包用于缓存 C/C++ 编译过程
+          sudo -E apt-get install -y dos2unix libfuse-dev jq curl git ccache
           
-          # 下载官方环境初始化脚本，并剔除会导致 GitHub Runner 断联卡死的 full-upgrade
           curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh -o init_env.sh
           sed -i '/full-upgrade/d' init_env.sh
           sed -i '/dist-upgrade/d' init_env.sh
@@ -82,8 +81,19 @@ jobs:
       - name: 克隆 PON 专有源码
         if: steps.check.outputs.build_needed == 'true'
         run: |
-          # 直接克隆到工作区真实目录 wrt，不使用跨目录软链接，防止打包丢失
           git clone --depth=1 --single-branch --branch master https://github.com/pbs05/ponwrt.git wrt
+
+      # ==================== 新增：利用 GitHub Cache 机制恢复缓存 ====================
+      - name: 恢复缓存 (下载依赖包与 ccache)
+        if: steps.check.outputs.build_needed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            wrt/dl
+            wrt/.ccache
+          key: ${{ runner.os }}-openwrt-${{ hashFiles('.config') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-
 
       - name: 更新 Feeds 官方依赖
         if: steps.check.outputs.build_needed == 'true'
@@ -96,14 +106,8 @@ jobs:
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt/package
-          
-          # 1. 达发 NPU 监控看板
           git clone --depth=1 https://github.com/luanmuc/luci-app-airoha-npu.git
-          
-          # 2. IPTV msd_lite 网页控制面板
           git clone --depth=1 https://github.com/ximiTech/luci-app-msd_lite.git
-          
-          # 3. 检查 feeds 是否已内置 msd_lite 核心程序；若没有则从 ImmortalWrt 官方源补充
           if [ ! -d "../feeds/packages/net/msd_lite" ]; then
             echo "正在补充 msd_lite 底层核心源码包..."
             git clone --depth=1 https://github.com/immortalwrt/packages.git temp_imm_pkg
@@ -115,11 +119,9 @@ jobs:
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          # 修复 Nokia XG-040G 网口映射与 DTS 补丁
           sed -i 's/ucidef_set_interface_lan "lan1 lan2 lan3 lan4"/ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"/g' target/linux/airoha/an7581/base-files/etc/board.d/02_network || true
           sed -i 's/interrupts.*//g' target/linux/airoha/dts/an7581-nokia_xg-040g-md-common.dtsi || true
 
-          # 读取仓库根目录下的 .config 文件
           if [ -f "$GITHUB_WORKSPACE/.config" ]; then
             echo "成功找到根目录下的 .config，正在写入配置..."
             cp -f "$GITHUB_WORKSPACE/.config" .config
@@ -129,14 +131,13 @@ jobs:
           fi
 
           make defconfig
-
-          echo "=== 验证关键目标与插件是否已在最终 .config 中生效 ==="
           grep -E "CONFIG_TARGET_DEVICE_|airoha-npu|msd_lite|cpufreq" .config || true
 
-      - name: 下载依赖软件包
+      - name: 下载依赖软件包 (结合缓存)
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
+          # 如果缓存命中，这一步下载会直接跳过已有的包，节约大量时间
           make download -j$(nproc)
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
@@ -145,8 +146,8 @@ jobs:
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          # 启动后台监控：如果 OOM 会在日志中抓取到记录
           (while true; do dmesg -T | grep -i -E "oom|out of memory|killed process"; sleep 10; done) &
+          # ccache 配合缓存，极大提升重复编译速度
           make -j$(nproc) || make -j1 V=s
 
       - name: 整理打包产物 (双保险提取与防空包机制)
@@ -156,19 +157,12 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/upload_firmware"
           cd wrt
 
-          echo "=== 1. 查看 bin/targets/ 下实际生成的所有文件 ==="
           find bin/targets/ -type f
-
-          echo "=== 2. 提取所有系统刷机镜像 (.itb / .bin / .ubi / .fip / .img / .tar) ==="
           find bin/targets/ -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.ubi" -o -name "*.fip" -o -name "*.img*" -o -name "*.tar*" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
-
-          echo "=== 3. 提取关键插件独立安装包 (.ipk / .apk 双格式兼容) ==="
           find bin/ -type f \( -name "*airoha-npu*" -o -name "*msd_lite*" -o -name "*cpufreq*" -o -name "*igmpproxy*" \) \( -name "*.ipk" -o -name "*.apk" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
-
-          echo "=== 4. 检查最终准备上传的文件列表 ==="
+          
           ls -lh "$GITHUB_WORKSPACE/upload_firmware/"
 
-          # 如果没有抓到任何文件，直接报错终止，绝不发布空 Release
           if [ -z "$(ls -A "$GITHUB_WORKSPACE/upload_firmware")" ]; then
             echo "::error::未提取到任何固件文件，请检查上方 bin/targets/ 目录输出！"
             exit 1
@@ -184,8 +178,8 @@ jobs:
           files: ${{ github.workspace }}/upload_firmware/*
           body: |
             ### Nokia XG-040G 定制纯净转发固件
-            - **底层核心**：基于 pbs05/ponwrt 源码编译
+            - **编译提速**：已启用依赖包及 ccache 缓存机制
+            - **底层核心**：基于 pbs05/ponwrt 源码编译 (.itb 专属版)
             - **NPU 加速**：集成 Airoha NPU (PPE) 状态看板
             - **IPTV 转流**：集成 msd_lite 与 igmpproxy
             - **硬件监控**：集成 CPU 调频与温度传感器
-            - **独立安装包**：附带核心插件的独立安装包（.ipk / .apk）作为双保险备份
