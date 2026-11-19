@@ -11,7 +11,7 @@ permissions: write-all
 jobs:
   check-and-build:
     name: Build Firmware
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
 
     steps:
       # ============================================================
