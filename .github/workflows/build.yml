@@ -1,3 +1,4 @@
+
 name: Build Pure Nokia XG-040G
 
 on:
@@ -11,16 +12,23 @@ jobs:
   check-and-build:
     name: Build Firmware
     runs-on: ubuntu-latest
+
     steps:
+      # ============================================================
+      # 1. 检出当前仓库
+      # ============================================================
       - name: 检出当前仓库
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. 检查上游源码更新
+      # ============================================================
       - name: 检查上游源码更新
         id: check
         run: |
-          UPSTREAM_HASH=$(curl -s "https://api.github.com/repos/pbs05/ponwrt/commits/master" | jq -r .sha)
+          UPSTREAM_HASH=$(curl -fsSL "https://api.github.com/repos/pbs05/ponwrt/commits/master" | jq -r .sha)
           echo "上游最新 Commit Hash: $UPSTREAM_HASH"
-          
+
           LOCAL_HASH=""
           if [ -f .upstream_hash ]; then
             LOCAL_HASH=$(cat .upstream_hash)
@@ -28,9 +36,11 @@ jobs:
           echo "本地上次 Commit Hash: $LOCAL_HASH"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$UPSTREAM_HASH" != "$LOCAL_HASH" ]; then
-            echo "build_needed=true" >> $GITHUB_OUTPUT
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+
             if [ -n "$UPSTREAM_HASH" ] && [ "$UPSTREAM_HASH" != "null" ]; then
               echo "$UPSTREAM_HASH" > .upstream_hash
+
               git config --local user.email "action@github.com"
               git config --local user.name "GitHub Action"
               git add .upstream_hash
@@ -39,51 +49,75 @@ jobs:
             fi
           else
             echo "上游源码没有更新，本次跳过编译。"
-            echo "build_needed=false" >> $GITHUB_OUTPUT
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ============================================================
+      # 3. 释放空间并挂载 Swap
+      # ============================================================
       - name: 释放空间并挂载 Swap 虚拟内存
         if: steps.check.outputs.build_needed == 'true'
         run: |
           echo "=== 1. 清理无用预装环境 ==="
+
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /opt/ghc || true
           sudo rm -rf /opt/hostedtoolcache/CodeQL || true
           sudo rm -rf /usr/local/share/powershell || true
           sudo rm -rf /usr/local/share/chromium || true
+
           df -hT
 
-          echo "=== 2. 创建 12GB Swap 虚拟内存 (避开系统默认占用) ==="
+          echo "=== 2. 创建 12GB Swap 虚拟内存 ==="
+
           sudo dd if=/dev/zero of=/mnt/swapfile-extra bs=1M count=12288 status=progress
           sudo chmod 600 /mnt/swapfile-extra
           sudo mkswap /mnt/swapfile-extra
           sudo swapon /mnt/swapfile-extra
+
           free -h
 
+      # ============================================================
+      # 4. 初始化编译环境
+      # ============================================================
       - name: 初始化编译环境 (加入 ccache 支持)
         if: steps.check.outputs.build_needed == 'true'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo -E apt-get update -y
-          # 新增了 ccache 包用于缓存 C/C++ 编译过程
-          sudo -E apt-get install -y dos2unix libfuse-dev jq curl git ccache
-          
+
+          sudo -E apt-get install -y \
+            dos2unix \
+            libfuse-dev \
+            jq \
+            curl \
+            git \
+            ccache
+
           curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh -o init_env.sh
+
           sed -i '/full-upgrade/d' init_env.sh
           sed -i '/dist-upgrade/d' init_env.sh
+
           sudo -E bash init_env.sh
           rm -f init_env.sh
-          
+
           sudo timedatectl set-timezone "Asia/Shanghai"
 
+      # ============================================================
+      # 5. 克隆 PonWrt 源码
+      # ============================================================
       - name: 克隆 PON 专有源码
         if: steps.check.outputs.build_needed == 'true'
         run: |
-          git clone --depth=1 --single-branch --branch master https://github.com/pbs05/ponwrt.git wrt
+          git clone --depth=1 --single-branch --branch master \
+            https://github.com/pbs05/ponwrt.git wrt
 
-      # ==================== 新增：利用 GitHub Cache 机制恢复缓存 ====================
+      # ============================================================
+      # 6. 恢复下载包与 ccache 缓存
+      # ============================================================
       - name: 恢复缓存 (下载依赖包与 ccache)
         if: steps.check.outputs.build_needed == 'true'
         uses: actions/cache@v4
@@ -95,81 +129,237 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-openwrt-
 
+      # ============================================================
+      # 7. 更新官方 Feeds
+      # ============================================================
       - name: 更新 Feeds 官方依赖
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 拉取专属插件 (NPU 看板与 IPTV 秒切)
+      # ============================================================
+      # 8. 拉取专属插件
+      # ============================================================
+      - name: 拉取专属插件 (Airoha NPU 与 msd_lite)
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt/package
-          git clone --depth=1 https://github.com/luanmuc/luci-app-airoha-npu.git
-          git clone --depth=1 https://github.com/ximiTech/luci-app-msd_lite.git
+
+          echo "=== 拉取 Airoha NPU 专用管理面板 ==="
+          git clone --depth=1 \
+            https://github.com/luanmuc/luci-app-airoha-npu.git
+
+          echo "=== 拉取 msd_lite LuCI 管理面板 ==="
+          git clone --depth=1 \
+            https://github.com/ximiTech/luci-app-msd_lite.git
+
+          echo "=== 检查 msd_lite 核心软件包 ==="
           if [ ! -d "../feeds/packages/net/msd_lite" ]; then
             echo "正在补充 msd_lite 底层核心源码包..."
-            git clone --depth=1 https://github.com/immortalwrt/packages.git temp_imm_pkg
-            cp -r temp_imm_pkg/net/msd_lite ./
+
+            git clone --depth=1 \
+              https://github.com/immortalwrt/packages.git temp_imm_pkg
+
+            if [ -d "temp_imm_pkg/net/msd_lite" ]; then
+              cp -r temp_imm_pkg/net/msd_lite ./
+            else
+              echo "::error::没有找到 msd_lite 核心软件包源码！"
+              exit 1
+            fi
+
             rm -rf temp_imm_pkg
           fi
 
+          echo "=== 专属插件拉取完成 ==="
+
+      # ============================================================
+      # 9. 注入配置与网口调整
+      # ============================================================
       - name: 注入配置与网口调整
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          sed -i 's/ucidef_set_interface_lan "lan1 lan2 lan3 lan4"/ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"/g' target/linux/airoha/an7581/base-files/etc/board.d/02_network || true
-          sed -i 's/interrupts.*//g' target/linux/airoha/dts/an7581-nokia_xg-040g-md-common.dtsi || true
+
+          echo "=== 调整 Nokia 网口定义 ==="
+
+          sed -i \
+            's/ucidef_set_interface_lan "lan1 lan2 lan3 lan4"/ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"/g' \
+            target/linux/airoha/an7581/base-files/etc/board.d/02_network || true
+
+          echo "=== 调整 DTS 中断配置 ==="
+
+          sed -i 's/interrupts.*//g' \
+            target/linux/airoha/dts/an7581-nokia_xg-040g-md-common.dtsi || true
+
+          echo "=== 导入仓库根目录 .config ==="
 
           if [ -f "$GITHUB_WORKSPACE/.config" ]; then
-            echo "成功找到根目录下的 .config，正在写入配置..."
             cp -f "$GITHUB_WORKSPACE/.config" .config
           else
-            echo "::error::未找到 .config 文件，请检查仓库根目录！"
+            echo "::error::未找到仓库根目录下的 .config 文件！"
             exit 1
           fi
 
-          make defconfig
-          grep -E "CONFIG_TARGET_DEVICE_|airoha-npu|msd_lite|cpufreq" .config || true
+          echo "=== 执行 make defconfig ==="
 
+          make defconfig
+
+          echo "=== 配置概要 ==="
+
+          grep -E \
+            'CONFIG_TARGET_DEVICE_|CONFIG_PACKAGE_(airoha|kmod-airoha|luci-app-airoha-npu|msd_lite|luci-app-msd_lite|tailscale|kmod-tun|luci-app-tailscale)|CONFIG_PACKAGE_(cpufreq|igmpproxy|lm-sensors|kmod-usb)' \
+            .config || true
+
+      # ============================================================
+      # 10. 检查最终配置
+      # ============================================================
+      - name: 检查最终配置
+        if: steps.check.outputs.build_needed == 'true'
+        run: |
+          cd wrt
+
+          echo "=== 检查必须保留的配置 ==="
+
+          REQUIRED_CONFIGS="
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-tf-ubi
+          CONFIG_PACKAGE_kmod-airoha-xpon
+          CONFIG_PACKAGE_airoha-pond
+          CONFIG_PACKAGE_luci-app-airoha-npu
+          CONFIG_PACKAGE_msd_lite
+          CONFIG_PACKAGE_luci-app-msd_lite
+          CONFIG_PACKAGE_tailscale
+          CONFIG_PACKAGE_kmod-tun
+          CONFIG_PACKAGE_luci-app-tailscale-community
+          "
+
+          FAILED=0
+
+          for CONFIG_NAME in $REQUIRED_CONFIGS; do
+            if grep -q "^${CONFIG_NAME}=y$" .config; then
+              echo "[OK] $CONFIG_NAME"
+            else
+              echo "[ERROR] 缺少或未启用: $CONFIG_NAME"
+              FAILED=1
+            fi
+          done
+
+          echo ""
+          echo "=== 检查不应启用的配置 ==="
+
+          FORBIDDEN_CONFIGS="
+          CONFIG_PACKAGE_igmpproxy
+          CONFIG_PACKAGE_luci-app-iptv
+          CONFIG_PACKAGE_cpufreq
+          CONFIG_PACKAGE_luci-app-cpufreq
+          CONFIG_PACKAGE_lm-sensors
+          CONFIG_PACKAGE_kmod-usb-storage
+          CONFIG_PACKAGE_kmod-usb-storage-uas
+          CONFIG_PACKAGE_kmod-usb3
+          "
+
+          for CONFIG_NAME in $FORBIDDEN_CONFIGS; do
+            if grep -q "^${CONFIG_NAME}=y$" .config; then
+              echo "[WARNING] 不应启用的配置仍然存在: $CONFIG_NAME"
+            else
+              echo "[OK] $CONFIG_NAME 未启用"
+            fi
+          done
+
+          echo ""
+          echo "=== 检查默认模块 ==="
+
+          grep -E '^CONFIG_MODULE_DEFAULT_(kmod-usb|luci-app-iptv)' .config || true
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::必须保留的软件包配置检查失败，停止编译！"
+            exit 1
+          fi
+
+          echo "配置检查通过，可以开始编译。"
+
+      # ============================================================
+      # 11. 下载依赖软件包
+      # ============================================================
       - name: 下载依赖软件包 (结合缓存)
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          # 如果缓存命中，这一步下载会直接跳过已有的包，节约大量时间
-          make download -j$(nproc)
+
+          make download -j"$(nproc)"
+
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
+      # ============================================================
+      # 12. 开始编译
+      # ============================================================
       - name: 开始编译固件并监控底层状态
         if: steps.check.outputs.build_needed == 'true'
         run: |
           cd wrt
-          (while true; do dmesg -T | grep -i -E "oom|out of memory|killed process"; sleep 10; done) &
-          # ccache 配合缓存，极大提升重复编译速度
-          make -j$(nproc) || make -j1 V=s
 
+          (while true; do
+            dmesg -T | grep -i -E "oom|out of memory|killed process"
+            sleep 10
+          done) &
+
+          make -j"$(nproc)" || make -j1 V=s
+
+      # ============================================================
+      # 13. 整理打包产物
+      # ============================================================
       - name: 整理打包产物 (双保险提取与防空包机制)
         id: organize
         if: steps.check.outputs.build_needed == 'true'
         run: |
           mkdir -p "$GITHUB_WORKSPACE/upload_firmware"
+
           cd wrt
 
+          echo "=== 固件产物列表 ==="
           find bin/targets/ -type f
-          find bin/targets/ -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.ubi" -o -name "*.fip" -o -name "*.img*" -o -name "*.tar*" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
-          find bin/ -type f \( -name "*airoha-npu*" -o -name "*msd_lite*" -o -name "*cpufreq*" -o -name "*igmpproxy*" \) \( -name "*.ipk" -o -name "*.apk" \) -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
-          
+
+          echo "=== 提取固件文件 ==="
+
+          find bin/targets/ -type f \
+            \( \
+              -name "*.itb" \
+              -o -name "*.bin" \
+              -o -name "*.ubi" \
+              -o -name "*.fip" \
+              -o -name "*.img*" \
+              -o -name "*.tar*" \
+            \) \
+            -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
+
+          echo "=== 提取专属软件包 ==="
+
+          find bin/ -type f \
+            \( \
+              -name "*airoha-npu*" \
+              -o -name "*msd_lite*" \
+              -o -name "*tailscale*" \
+            \) \
+            \( -name "*.ipk" -o -name "*.apk" \) \
+            -exec cp -f {} "$GITHUB_WORKSPACE/upload_firmware/" \;
+
+          echo "=== 最终文件列表 ==="
+
           ls -lh "$GITHUB_WORKSPACE/upload_firmware/"
 
           if [ -z "$(ls -A "$GITHUB_WORKSPACE/upload_firmware")" ]; then
-            echo "::error::未提取到任何固件文件，请检查上方 bin/targets/ 目录输出！"
+            echo "::error::未提取到任何固件文件，请检查 bin/targets/ 目录！"
             exit 1
           fi
 
-          echo "BUILD_DATE=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date +'%Y.%m.%d-%H%M')" >> "$GITHUB_ENV"
 
+      # ============================================================
+      # 14. 发布 Release
+      # ============================================================
       - name: 发布 Release
         if: steps.check.outputs.build_needed == 'true'
         uses: softprops/action-gh-release@v1
@@ -177,9 +367,13 @@ jobs:
           tag_name: Nokia-XG-040G-${{ env.BUILD_DATE }}
           files: ${{ github.workspace }}/upload_firmware/*
           body: |
-            ### Nokia XG-040G 定制纯净转发固件
-            - **编译提速**：已启用依赖包及 ccache 缓存机制
-            - **底层核心**：基于 pbs05/ponwrt 源码编译 (.itb 专属版)
-            - **NPU 加速**：集成 Airoha NPU (PPE) 状态看板
-            - **IPTV 转流**：集成 msd_lite 与 igmpproxy
-            - **硬件监控**：集成 CPU 调频与温度传感器
+            ### Nokia XG-040G-TF 纯净 PON 网关固件
+
+            - **硬件平台**：Airoha AN7581 / Nokia XG-040G-TF UBI
+            - **PON 功能**：保留 PON 驱动、BOSA 和 PON 管理组件
+            - **硬件加速**：集成 Airoha NPU / PPE 专用管理面板
+            - **IPTV**：集成 msd_lite，不包含 igmpproxy
+            - **CPU 监控**：使用 Airoha 专用面板管理 CPU 频率及相关硬件状态
+            - **远程组网**：集成 Tailscale、TUN 和 LuCI 管理界面
+            - **系统定位**：轻量化 PON 网关，不包含 NAS、下载服务及其他代理/VPN 管理服务
+            - **编译基础**：基于 pbs05/ponwrt master
